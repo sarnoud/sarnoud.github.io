@@ -27,3 +27,4 @@ You can also uninstall the Extension at any time.
 ## Changes to Our Privacy Policy
 
 We may update this Privacy Policy from time to time. You are responsible for periodically reviewing this Privacy Policy for updates. If you continue to use the Extension after we post a notice of changes, you agree to be bound by the updated Privacy Policy.
+
