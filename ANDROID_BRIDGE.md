@@ -1,38 +1,36 @@
-# Android Notification Bridge - Minimal MVP Specification
+# Android Notification Bridge - Production Grade Specification
 
 ## 1. Overview
 The **Android Notification Bridge** is a lightweight, background-first Android application designed to intercept local system notifications from specific medical apps (e.g., Medtronic MiniMed), extract critical health data (Glucose values, IOB) via regex, and dispatch this data to a configured Webhook URL.
 
-This document outlines the **absolute minimal** technical specification required to implement this app from scratch, removing all non-essential libraries and complex UI elements, while still ensuring reliable data delivery.
+This document outlines the technical specification required to implement this app with a **production-grade retry mechanism** using Android's `WorkManager`.
 
 ---
 
-## 2. Simplifications for the Minimal MVP
+## 2. Architecture & Reliability
 
-To achieve the smallest possible footprint and fastest development time, the following simplifications have been made compared to a production-grade app:
-1. **Zero External Dependencies**: Removed `OkHttp`, `WorkManager`, `androidx.preference`, and `kotlinx.serialization`. The app will rely purely on built-in Android/Java APIs (`HttpURLConnection`, `org.json.JSONObject`).
-2. **Basic Retry Mechanism**: Instead of a complex `WorkManager` setup, failed payloads are temporarily stored in a local queue (e.g., a JSON array in `SharedPreferences`). The app will attempt to flush this queue the next time a notification triggers a webhook send.
-3. **Basic UI**: No complex Settings fragments. Just a single `MainActivity` with basic `EditText` fields saving to `SharedPreferences`.
-4. **Hardcoded Regex**: Advanced regex overrides are omitted. The MVP uses hardcoded regex patterns known to work for the target apps.
+The following architectural choices ensure reliability and maintainability:
+1. **WorkManager Integration**: Uses `WorkManager` for all network operations. This provides built-in persistence, constraints (e.g., waiting for network), and a professional retry policy with exponential backoff.
+2. **Minimal UI**: A single `MainActivity` with basic `EditText` fields saving to `SharedPreferences`.
+3. **Hardcoded Regex**: The app uses optimized regex patterns known to work for the target apps.
 
 ---
 
 ## 3. Project Setup & Architecture
 
 ### 3.1. Gradle Dependencies (`build.gradle.kts` - app level)
-Keep it strictly to the defaults provided by a new Android Studio project.
 ```kotlin
 dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.11.0")
-    // Note: No external networking or serialization libraries required.
+    
+    // WorkManager for production-grade retries
+    implementation("androidx.work:work-runtime-ktx:2.9.0")
 }
 ```
 
 ### 3.2. AndroidManifest.xml
-Requires standard internet permissions and the `BIND_NOTIFICATION_LISTENER_SERVICE` permission.
-
 ```xml
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.example.notificationbridge">
@@ -79,6 +77,7 @@ package com.example.notificationbridge
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.content.Context
+import androidx.work.*
 
 class BridgeNotificationService : NotificationListenerService() {
     
@@ -91,27 +90,39 @@ class BridgeNotificationService : NotificationListenerService() {
         
         if (sbn.packageName != targetPackage) return
 
-        // 1. Debounce (Prevent duplicate parsing within 50 seconds)
         val diffSecs = (sbn.postTime - lastPostTime) / 1000
         if (diffSecs < 50) return 
 
-        // 2. Extract Data
         val glucose = NotificationParser.extractGlucose(sbn, applicationContext)
         
         if (!glucose.isNaN()) {
-            if (glucose == lastValue && diffSecs < 250) {
-                return // Same value within 4 mins -> redundant
-            }
+            if (glucose == lastValue && diffSecs < 250) return
             
             lastValue = glucose
             lastPostTime = sbn.postTime
             
             val webhookUrl = prefs.getString("WEBHOOK_URL", "")
             if (!webhookUrl.isNullOrEmpty()) {
-                // 3. Dispatch Webhook
-                WebhookEmitter.sendPayload(applicationContext, webhookUrl, sbn.postTime, sbn.packageName, glucose)
+                enqueueWebhookWork(webhookUrl, sbn.postTime, sbn.packageName, glucose)
             }
         }
+    }
+
+    private fun enqueueWebhookWork(url: String, time: Long, pkg: String, value: Float) {
+        val data = workDataOf(
+            "URL" to url,
+            "TIME" to time,
+            "SOURCE" to pkg,
+            "VALUE" to value
+        )
+
+        val request = OneTimeWorkRequestBuilder<WebhookWorker>()
+            .setInputData(data)
+            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, WorkRequest.MIN_BACKOFF_MILLIS, java.util.concurrent.TimeUnit.MILLISECONDS)
+            .build()
+
+        WorkManager.getInstance(applicationContext).enqueue(request)
     }
 }
 ```
@@ -119,156 +130,58 @@ class BridgeNotificationService : NotificationListenerService() {
 ---
 
 ## 5. Data Extraction (`NotificationParser.kt`)
-
-Stripped down to exactly what is needed to parse standard extras and `RemoteViews` using hardcoded regex.
-
-```kotlin
-package com.example.notificationbridge
-
-import android.service.notification.StatusBarNotification
-import android.content.Context
-import android.util.Log
-
-object NotificationParser {
-    private val defaultGlucoseRegex = """(?:^|\s)(\d+(\.\d)?)(?=\s|\p{S}|$)""".toRegex()
-
-    fun extractGlucose(sbn: StatusBarNotification, context: Context): Float {
-        val extras = sbn.notification.extras
-        val title = extras.getCharSequence("android.title")?.toString()
-        val text = extras.getCharSequence("android.text")?.toString()
-
-        parseString(title)?.let { return it }
-        parseString(text)?.let { return it }
-
-        var value = processRemoteViews(sbn.notification.contentView, context)
-        if (!value.isNaN()) return value
-
-        return processRemoteViews(sbn.notification.bigContentView, context)
-    }
-
-    private fun parseString(input: String?): Float? {
-        if (input.isNullOrEmpty()) return null
-        val match = defaultGlucoseRegex.find(input)
-        return match?.groupValues?.get(1)?.toFloatOrNull()
-    }
-
-    private fun processRemoteViews(remoteViews: android.widget.RemoteViews?, context: Context): Float {
-        if (remoteViews == null) return Float.NaN
-        try {
-            val appliedView = remoteViews.apply(context, null)
-            return traverseAndFind(appliedView.rootView)
-        } catch (e: Exception) {
-            return Float.NaN
-        }
-    }
-
-    private fun traverseAndFind(view: android.view.View): Float {
-        when (view) {
-            is android.widget.TextView -> {
-                val text = view.text.toString().replace(",", ".").trim()
-                val parsed = parseString(text)
-                if (parsed != null && isValidGlucose(parsed)) return parsed
-            }
-            is android.view.ViewGroup -> {
-                for (i in 0 until view.childCount) {
-                    val result = traverseAndFind(view.getChildAt(i))
-                    if (!result.isNaN()) return result
-                }
-            }
-        }
-        return Float.NaN
-    }
-    
-    private fun isValidGlucose(value: Float): Boolean {
-        return (value in 20.0..600.0) || (value in 1.1..33.3)
-    }
-}
-```
+(Unchanged from minimal specification - see previous versions for full code)
 
 ---
 
-## 6. Minimal Webhook Emitter with Retry (`WebhookEmitter.kt`)
+## 6. Production Webhook Worker (`WebhookWorker.kt`)
 
-Uses pure Java `HttpURLConnection` wrapped in a standard `Thread`. Implements a basic queued retry system using `SharedPreferences`.
+Uses `CoroutineWorker` for asynchronous execution and `HttpURLConnection` for a zero-dependency network stack.
 
 ```kotlin
 package com.example.notificationbridge
 
 import android.content.Context
-import org.json.JSONArray
+import androidx.work.CoroutineWorker
+import androidx.work.WorkerParameters
 import org.json.JSONObject
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
-import kotlin.concurrent.thread
 
-object WebhookEmitter {
-    private const val QUEUE_KEY = "FAILED_PAYLOAD_QUEUE"
+class WebhookWorker(appContext: Context, workerParams: WorkerParameters) :
+    CoroutineWorker(appContext, workerParams) {
 
-    fun sendPayload(context: Context, webhookUrl: String, timestamp: Long, sourcePackage: String, glucose: Float) {
-        val payload = JSONObject().apply {
-            put("timestamp", timestamp)
-            put("source", sourcePackage)
-            put("glucose", glucose)
-        }
-        
-        enqueuePayload(context, payload)
-        flushQueue(context, webhookUrl)
-    }
+    override suspend fun doWork(): Result {
+        val webhookUrl = inputData.getString("URL") ?: return Result.failure()
+        val timestamp = inputData.getLong("TIME", 0L)
+        val source = inputData.getString("SOURCE") ?: ""
+        val value = inputData.getFloat("VALUE", 0.0f)
 
-    private fun enqueuePayload(context: Context, payload: JSONObject) {
-        val prefs = context.getSharedPreferences("BridgePrefs", Context.MODE_PRIVATE)
-        val queueStr = prefs.getString(QUEUE_KEY, "[]")
-        val queue = JSONArray(queueStr)
-        queue.put(payload)
-        prefs.edit().putString(QUEUE_KEY, queue.toString()).apply()
-    }
-
-    private fun flushQueue(context: Context, webhookUrl: String) {
-        thread {
-            val prefs = context.getSharedPreferences("BridgePrefs", Context.MODE_PRIVATE)
-            val queueStr = prefs.getString(QUEUE_KEY, "[]")
-            val queue = JSONArray(queueStr)
-            
-            if (queue.length() == 0) return@thread
-
-            val successfulIndices = mutableListOf<Int>()
-
-            for (i in 0 until queue.length()) {
-                val payload = queue.getJSONObject(i)
-                try {
-                    val url = URL(webhookUrl)
-                    val conn = url.openConnection() as HttpURLConnection
-                    conn.requestMethod = "POST"
-                    conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8")
-                    conn.doOutput = true
-                    conn.connectTimeout = 5000
-                    conn.readTimeout = 5000
-
-                    OutputStreamWriter(conn.outputStream).use { writer ->
-                        writer.write(payload.toString())
-                        writer.flush()
-                    }
-
-                    if (conn.responseCode in 200..299) {
-                        successfulIndices.add(i)
-                    }
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                    break // Stop processing the queue on network failure to preserve order and save battery
-                }
+        return try {
+            val payload = JSONObject().apply {
+                put("timestamp", timestamp)
+                put("source", source)
+                put("glucose", value)
             }
 
-            // Remove successful payloads from queue
-            if (successfulIndices.isNotEmpty()) {
-                val newQueue = JSONArray()
-                for (i in 0 until queue.length()) {
-                    if (!successfulIndices.contains(i)) {
-                        newQueue.put(queue.getJSONObject(i))
-                    }
-                }
-                prefs.edit().putString(QUEUE_KEY, newQueue.toString()).apply()
+            val conn = (URL(webhookUrl).openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+                doOutput = true
+                connectTimeout = 10000
+                readTimeout = 10000
             }
+
+            OutputStreamWriter(conn.outputStream).use { it.write(payload.toString()) }
+
+            if (conn.responseCode in 200..299) {
+                Result.success()
+            } else {
+                Result.retry()
+            }
+        } catch (e: Exception) {
+            if (runAttemptCount < 10) Result.retry() else Result.failure()
         }
     }
 }
@@ -277,48 +190,4 @@ object WebhookEmitter {
 ---
 
 ## 7. Configuration UI (`MainActivity.kt`)
-
-A simple Activity with two input fields and a button to request permissions.
-
-```kotlin
-package com.example.notificationbridge
-
-import android.content.Context
-import android.content.Intent
-import android.os.Bundle
-import android.provider.Settings
-import android.widget.Button
-import android.widget.EditText
-import android.widget.Toast
-import androidx.appcompat.app.AppCompatActivity
-
-class MainActivity : AppCompatActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_main)
-
-        val prefs = getSharedPreferences("BridgePrefs", Context.MODE_PRIVATE)
-        
-        val editPackage = findViewById<EditText>(R.id.editPackage)
-        val editWebhook = findViewById<EditText>(R.id.editWebhook)
-        val btnSave = findViewById<Button>(R.id.btnSave)
-        val btnPermission = findViewById<Button>(R.id.btnPermission)
-
-        editPackage.setText(prefs.getString("TARGET_PACKAGE", "com.medtronic.diabetes.minimedmobile.eu"))
-        editWebhook.setText(prefs.getString("WEBHOOK_URL", ""))
-
-        btnSave.setOnClickListener {
-            prefs.edit().apply {
-                putString("TARGET_PACKAGE", editPackage.text.toString())
-                putString("WEBHOOK_URL", editWebhook.text.toString())
-                apply()
-            }
-            Toast.makeText(this, "Saved!", Toast.LENGTH_SHORT).show()
-        }
-
-        btnPermission.setOnClickListener {
-            startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
-        }
-    }
-}
-```
+(Unchanged from minimal specification - see previous versions for full code)
