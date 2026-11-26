@@ -231,7 +231,7 @@ title: Ratatouille — Meal Planning & Recipe Companion
 
 ---
 
-<p><em data-i18n="footer.note">Built with care for home cooks</em> &mdash; <a href="https://sarnoud.github.io">sarnoud.github.io</a></p>
+<p><em data-i18n="footer.note">Built with care for home cooks</em> &mdash; <a href="./privacy.html" data-i18n="footer.privacy">Privacy Policy</a> &middot; <a href="./terms.html" data-i18n="footer.terms">Terms of Service</a> &middot; <a href="https://sarnoud.github.io">sarnoud.github.io</a></p>
 
 <script>
   (function () {
@@ -267,7 +267,9 @@ title: Ratatouille — Meal Planning & Recipe Companion
         "how.step2.body": "Ask for a weeknight dinner, a balanced weekly menu, or snap a photo of ingredients you want to use up.",
         "how.step3.title": "Shop & Cook",
         "how.step3.body": "Review structured recipe cards, check nutritional balance, grab your shopping list, and share with family.",
-        "footer.note": "Built with care for home cooks"
+        "footer.note": "Built with care for home cooks",
+        "footer.privacy": "Privacy Policy",
+        "footer.terms": "Terms of Service"
       },
       fr: {
         pageTitle: "Ratatouille — Planification de repas et recettes",
@@ -297,7 +299,9 @@ title: Ratatouille — Meal Planning & Recipe Companion
         "how.step2.body": "Demandez un dîner rapide, un menu équilibré pour la semaine, ou prenez en photo les ingrédients à utiliser.",
         "how.step3.title": "Faites vos courses et cuisinez",
         "how.step3.body": "Consultez vos fiches recettes structurées, vérifiez l'équilibre nutritionnel, récupérez votre liste de courses et partagez avec vos proches.",
-        "footer.note": "Conçu avec soin pour cuisiner à la maison"
+        "footer.note": "Conçu avec soin pour cuisiner à la maison",
+        "footer.privacy": "Confidentialité",
+        "footer.terms": "Conditions d'utilisation"
       }
     };
 
